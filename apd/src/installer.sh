@@ -439,3 +439,6 @@ SERVICED=$NVBASE/service.d
 # Some modules dependents on this
 export MAGISK_VER=27.0
 export MAGISK_VER_CODE=27000
+export KSU=1
+export KSU_KERNEL_VER_CODE=19998
+export MODULE_MIN_KSUD_VERSION=19999
