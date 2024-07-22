@@ -132,3 +132,9 @@ jobs:
           generateReleaseNotes: true
           makeLatest: true
           replacesArtifacts: true
+
+      - name: Export downloaded file
+        uses: actions/upload-artifact@v2
+        with:
+          name: app-release
+          path: app/build/outputs/apk/release/app-release-unsigned.apk          
