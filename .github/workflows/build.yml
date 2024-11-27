@@ -54,18 +54,10 @@ jobs:
         with:
           packages: ''
 
-      - name: Install toolchain
-        run: |
-          rustup default stable
-          rustup update stable
-          cargo install cargo-ndk
-          rustup target install aarch64-linux-android
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          workspaces: apd
-          cache-targets: false
+          go-version: '1.20'
 
       - name: Build with Gradle
         run: |
@@ -77,31 +69,68 @@ jobs:
           ./gradlew clean assembleRelease
           echo "BUILD_TOOL_VERSION=$(ls /usr/local/lib/android/sdk/build-tools/ | tail -n 1)" >> $GITHUB_ENV
 
+      # 新增步骤：生成签名密钥
+      - name: Generate Signing Keystore
+        run: |
+          keytool -genkey -v \
+            -keystore my-release-key.keystore \
+            -alias my_alias \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass 123456 \
+            -keypass 123456 \
+            -dname "CN=Default, OU=Default, O=Default, L=Default, S=Default, C=US"
+
+      # 新增步骤：将签名密钥编码为 Base64
+      - name: Encode Keystore to Base64
+        id: encode_keystore
+        run: |
+          base64 -w 0 my-release-key.keystore > keystore_base64.txt
+          echo "KEYSTORE_BASE64=$(cat keystore_base64.txt)" >> $GITHUB_ENV
+
+      # 新增步骤：配置签名密钥信息
+      - name: Configure Signing Information
+        run: |
+          echo "SIGNING_KEY=${KEYSTORE_BASE64}" >> $GITHUB_ENV
+          echo "ALIAS=my_alias" >> $GITHUB_ENV
+          echo "KEY_STORE_PASSWORD=123456" >> $GITHUB_ENV
+          echo "KEY_PASSWORD=123456" >> $GITHUB_ENV
+
+      # 修改签名步骤，使用环境变量而非 Secrets
       - name: Sign Release
         env:
-          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_KEY: ${{ env.SIGNING_KEY }}
+          ALIAS: ${{ env.ALIAS }}
+          KEY_STORE_PASSWORD: ${{ env.KEY_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ env.KEY_PASSWORD }}
         if: ${{ env.SIGNING_KEY != '' }}
-        continue-on-error: true
         uses: noriban/sign-android-release@v5.1
         id: sign_app
         with:
           releaseDirectory: app/build/outputs/apk/release
-          signingKeyBase64: ${{ secrets.SIGNING_KEY }}
-          alias: ${{ secrets.ALIAS }}
-          keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
-          keyPassword: ${{ secrets.KEY_PASSWORD }}
+          signingKeyBase64: ${{ env.SIGNING_KEY }}
+          alias: ${{ env.ALIAS }}
+          keyStorePassword: ${{ env.KEY_STORE_PASSWORD }}
+          keyPassword: ${{ env.KEY_PASSWORD }}
+
+      # 增加调试步骤：列出签名目录中的文件
+      - name: List Signed APKs
+        if: ${{ env.SIGNING_KEY != '' }}
+        run: |
+          ls -la app/build/outputs/apk/release/
+          echo "Signed Release File: ${{ steps.sign_app.outputs.signedReleaseFile }}"
+          echo "Full Path: $(pwd)/${{ steps.sign_app.outputs.signedReleaseFile }}"
 
       - name: Upload build artifact
-        env:
-          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
         if: ${{ env.SIGNING_KEY != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: APatch
-          path: ${{steps.sign_app.outputs.signedReleaseFile}}
+          path: ${{ steps.sign_app.outputs.signedReleaseFile }}
 
       - name: Post to channel
-        if: ${{github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.ref_type != 'tag'}}
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.ref_type != 'tag' }}
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
@@ -110,23 +139,40 @@ jobs:
         run: |
           if [ ! -z "${{ secrets.BOT_TOKEN }}" ]; then
             OUTPUT="app/build/outputs/apk/release"
-            export Release=$(find $OUTPUT -name "*.apk")
+            export Release=$(find $OUTPUT -name "*.apk" | head -n 1)
+            echo "Found APK: $Release"
             URL=$(python3 .github/scripts/telegram_url.py -1002058433411)
-            curl -v "$URL" -F Release=@${{ steps.sign_app.outputs.signedReleaseFile }}
+            curl -v "$URL" -F Release=@${Release}
             URL=$(python3 .github/scripts/telegram_url.py -1001910818234)
-            curl -v "$URL" -F Release=@${{ steps.sign_app.outputs.signedReleaseFile }}
+            curl -v "$URL" -F Release=@${Release}
           fi
 
       - name: Release apk
         env:
-          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_KEY: ${{ env.SIGNING_KEY }}
         if: ${{ env.SIGNING_KEY != '' && github.ref_type == 'tag' }}
-        continue-on-error: true
         uses: ncipollo/release-action@v1
         with:
           token: ${{ github.token }}
           tag: ${{ steps.parse_version.outputs.VERSION }}
-          artifacts: ${{steps.sign_app.outputs.signedReleaseFile}}
+          artifacts: |
+            ${{ steps.sign_app.outputs.signedReleaseFile }}
           generateReleaseNotes: true
           makeLatest: true
           replacesArtifacts: true
+
+      # 新增步骤：压缩 APK 目录
+      - name: Compress Release APKs
+        if: ${{ env.SIGNING_KEY != '' }}
+        run: |
+          cd app/build/outputs/apk/release
+          zip -r release_apks.zip *.apk
+          mv release_apks.zip ../../../release_apks.zip
+
+      # 新增步骤：上传压缩后的 APK 文件作为工件
+      - name: Upload Compressed APKs
+        if: ${{ env.SIGNING_KEY != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Compressed_Release_APKs
+          path: release_apks.zip
